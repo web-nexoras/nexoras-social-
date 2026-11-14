@@ -1,0 +1,90 @@
+import React, { useState, useRef, useEffect } from "react";
+import { FiSearch } from "react-icons/fi";
+import { Link, useNavigate } from "react-router-dom";
+import { useAuth } from "@features/auth/context/AuthContext";
+
+export default function Navbar() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const dropdownRef = useRef(null);
+
+  const handleLogout = async () => {
+    await logout();
+    setOpen(false);
+    navigate("/signin");
+  };
+
+  const handleSearch = (e) => {
+    e.preventDefault();
+    if (query.trim()) {
+      navigate(`/friends?search=${encodeURIComponent(query.trim())}`);
+    }
+  };
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  return (
+    <nav className="neo-raised sticky top-0 z-50">
+      <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+
+
+        {user && (
+          <form onSubmit={handleSearch} className="flex-1 max-w-md relative">
+            <button type="submit" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
+            <FiSearch className="h-5 w-5" />
+          </button>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search users..."
+              className="w-full pl-10 pr-4 py-2 rounded-full neo-input"
+            />
+          </form>
+        )}
+
+        <div className="flex items-center gap-4 shrink-0">
+          {user ? (
+            <>
+              <div className="hidden sm:flex flex-col text-right">
+                <span className="text-sm font-semibold text-slate-800">{user.fullname}</span>
+                <span className="text-xs text-slate-400">{user.email}</span>
+              </div>
+              <div className="relative" ref={dropdownRef}>
+                <button onClick={() => setOpen(!open)} className="flex items-center gap-2">
+                  <img
+                    src={user.avatar || "https://via.placeholder.com/40"}
+                    alt="avatar"
+                    className="w-9 h-9 rounded-full object-cover border-2 border-brand"
+                  />
+                </button>
+                {open && (
+                  <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-lg border py-2 z-50">
+                    <Link to="/dashboard" onClick={() => setOpen(false)} className="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Dashboard</Link>
+                    <Link to="/profile" onClick={() => setOpen(false)} className="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Profile</Link>
+                    <button onClick={handleLogout} className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50">Logout</button>
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <Link to="/signin" className="text-slate-700 hover:text-brand">Sign In</Link>
+              <Link to="/signup" className="px-4 py-1.5 rounded-lg bg-brand text-white hover:bg-indigo-700 transition">Sign Up</Link>
+            </>
+          )}
+        </div>
+      </div>
+    </nav>
+  );
+}

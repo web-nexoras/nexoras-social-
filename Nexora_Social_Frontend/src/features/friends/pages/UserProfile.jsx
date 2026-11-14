@@ -1,0 +1,272 @@
+import React, { useEffect, useState } from "react";
+import { FiCheck, FiMail, FiMapPin, FiShield, FiUserPlus, FiMessageSquare, FiArrowLeft, FiUser } from "react-icons/fi";
+import { useParams, Link, useNavigate } from "react-router-dom";
+import { usersApi } from "@features/friends";
+import { friendsApi } from "@features/friends";
+import { followsApi } from "@features/friends";
+import { useToast } from "@shared";
+import { Skeleton } from "@shared";
+
+export default function UserProfile() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const { showToast } = useToast();
+
+  const [user, setUser] = useState(null);
+  const [relationship, setRelationship] = useState(null);
+  const [isSelf, setIsSelf] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [following, setFollowing] = useState(false);
+  const [imgError, setImgError] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    const load = async () => {
+      try {
+        const res = await usersApi.get(id);
+        if (!alive) return;
+        setUser(res.data?.user || null);
+        setRelationship(res.data?.relationship || null);
+        setIsSelf(!!res.data?.isSelf);
+        if (!res.data?.isSelf) {
+          followsApi.status(id).then((r) => setFollowing(!!r.data?.following)).catch(() => {});
+        }
+      } catch (e) {
+        if (!alive) return;
+        console.error(e);
+        setUser(null);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    };
+    load();
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+
+  const addFriend = async () => {
+    try {
+      await friendsApi.sendRequest(id);
+      showToast("Friend request sent successfully!", "success");
+      setRelationship((prev) => ({ ...(prev || {}), requestSent: true }));
+    } catch (e) {
+      const errMsg = e?.response?.data?.message || "Could not send friend request";
+      showToast(errMsg, "error");
+    }
+  };
+
+  const toggleFollow = async () => {
+    try {
+      if (following) {
+        await followsApi.unfollow(id);
+        setFollowing(false);
+        showToast("Unfollowed", "info");
+      } else {
+        await followsApi.follow(id);
+        setFollowing(true);
+        showToast("Following", "success");
+      }
+    } catch (e) {
+      showToast(e?.response?.data?.message || "Failed", "error");
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="max-w-3xl mx-auto mt-6 px-4 sm:px-0">
+        <div className="bg-white rounded-3xl shadow-xl border border-slate-100 overflow-hidden">
+          <Skeleton className="h-36 sm:h-40 w-full" />
+          <div className="px-4 sm:px-6 md:px-8 pb-6 sm:pb-8">
+            <div className="-mt-12 sm:-mt-14 mb-5 sm:mb-6 flex items-end gap-3">
+              <Skeleton className="w-24 h-24 sm:w-28 sm:h-28 rounded-full shrink-0" />
+              <div className="flex-1 min-w-0 space-y-2 pb-1">
+                <Skeleton className="h-6 w-1/3" />
+                <Skeleton className="h-4 w-1/4" />
+              </div>
+            </div>
+            <div className="space-y-3">
+              <Skeleton className="h-4 w-2/3" />
+              <Skeleton className="h-4 w-1/2" />
+              <Skeleton className="h-10 w-40 rounded-xl" />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="max-w-md mx-auto mt-16 text-center bg-white p-8 rounded-3xl shadow-lg border border-slate-100">
+        <p className="text-slate-500 font-medium mb-4">User not found</p>
+        <button
+          onClick={() => navigate(-1)}
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800 transition"
+        >
+          <FiArrowLeft /> Go Back
+        </button>
+      </div>
+    );
+  }
+
+  const rel = relationship || {};
+  const canMessage = (rel.isFriend || user.role === "admin") && !isSelf;
+  const initials = (user.fullname || "User")
+    .split(" ")
+    .map((w) => w[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+
+  return (
+    <div className="max-w-3xl mx-auto mt-6 px-4 sm:px-0">
+      <div className="bg-white rounded-3xl shadow-xl border border-slate-100 overflow-hidden transition">
+        {/* Cover banner — clean monochrome gradient */}
+        <div className="relative h-36 sm:h-40 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-700 overflow-hidden">
+          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,_var(--tw-gradient-stops))] from-white/15 via-transparent to-transparent"></div>
+          <div className="absolute -bottom-24 -right-10 w-80 h-80 rounded-full bg-white/5 blur-3xl"></div>
+          <div className="absolute top-3 right-3 sm:top-4 sm:right-4 flex items-center gap-2 bg-white/10 backdrop-blur-md border border-white/10 px-2.5 py-1 sm:px-3 rounded-full text-xs font-semibold text-slate-200">
+            <FiShield className="text-slate-300" />
+            <span className="capitalize">{user.role} Profile</span>
+          </div>
+        </div>
+
+        {/* Card Content */}
+        <div className="px-4 sm:px-6 md:px-8 pb-6 sm:pb-8">
+          <div className="-mt-12 sm:-mt-14 mb-5 sm:mb-6 flex items-end gap-3">
+            <button
+              onClick={() => navigate(-1)}
+              className="mb-2 inline-flex items-center justify-center w-10 h-10 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200 transition shrink-0"
+              title="Back"
+            >
+              <FiArrowLeft />
+            </button>
+            {/* Avatar with fallback to clean initials — z-10 so it paints over the banner */}
+            <div className="relative z-10 w-24 h-24 sm:w-28 sm:h-28 rounded-full border-4 border-white shadow-2xl overflow-hidden bg-slate-900 shrink-0">
+              {user.avatar && !imgError ? (
+                <img
+                  src={user.avatar}
+                  alt={user.fullname}
+                  onError={() => setImgError(true)}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <div className="w-full h-full bg-gradient-to-br from-slate-600 via-slate-700 to-slate-900 flex items-center justify-center text-white text-xl sm:text-2xl font-black tracking-wider">
+                  {initials}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h1 className="text-xl sm:text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight break-words">
+                  {user.fullname}
+                </h1>
+                <span
+                  className={`text-xs font-bold px-2.5 py-0.5 rounded-full capitalize border ${
+                    user.role === "admin"
+                      ? "bg-purple-50 text-purple-700 border-purple-200"
+                      : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                  }`}
+                >
+                  {user.role}
+                </span>
+              </div>
+              <p className="text-xs sm:text-sm text-slate-500 flex items-center gap-1.5 mt-1 break-all">
+                <FiMail className="text-slate-400 shrink-0" /> {user.email}
+              </p>
+            </div>
+          </div>
+
+          {/* User Details Grid */}
+          <div className="grid sm:grid-cols-2 gap-4 text-sm mb-6">
+            <div className="bg-slate-50/80 border border-slate-200/70 rounded-2xl p-4 flex items-start gap-3 shadow-sm">
+              <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0 mt-0.5 font-bold">
+                <FiUser />
+              </div>
+              <div>
+                <p className="text-slate-400 text-xs font-medium uppercase tracking-wider mb-0.5">Role</p>
+                <p className="font-semibold text-slate-800 capitalize">{user.role}</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50/80 border border-slate-200/70 rounded-2xl p-4 flex items-start gap-3 shadow-sm">
+              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0 mt-0.5 font-bold">
+                <FiMapPin />
+              </div>
+              <div>
+                <p className="text-slate-400 text-xs font-medium uppercase tracking-wider mb-0.5">Address</p>
+                <p className="font-semibold text-slate-800">{user.address || "No address provided"}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-100">
+            {isSelf && (
+              <Link
+                to="/profile"
+                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-brand to-indigo-600 text-white text-sm font-semibold hover:shadow-lg transition"
+              >
+                Edit My Profile
+              </Link>
+            )}
+
+            {!isSelf && rel.isFriend && (
+              <span className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 text-sm font-semibold">
+                <FiCheck className="text-emerald-600 font-bold" /> Friends
+              </span>
+            )}
+
+            {!isSelf && !rel.isFriend && rel.requestSent && (
+              <span className="px-4 py-2.5 rounded-xl bg-slate-100 text-slate-500 border border-slate-200 text-sm font-semibold">
+                Friend Request Pending
+              </span>
+            )}
+
+            {!isSelf && !rel.isFriend && rel.requestReceived && (
+              <Link
+                to="/friends"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-cyan-600 text-white text-sm font-semibold hover:bg-cyan-700 shadow-md transition"
+              >
+                Respond to Request
+              </Link>
+            )}
+
+            {!isSelf && !rel.isFriend && !rel.requestSent && !rel.requestReceived && (
+              <button
+                onClick={addFriend}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-brand to-indigo-600 text-white text-sm font-semibold hover:shadow-lg transition"
+              >
+                <FiUserPlus /> Add Friend
+              </button>
+            )}
+
+            {canMessage && (
+              <Link
+                to={`/chat?user=${user._id}`}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800 shadow-md hover:shadow-lg transition"
+              >
+                <FiMessageSquare /> Message
+              </Link>
+            )}
+
+            {!isSelf && (
+              <button
+                onClick={toggleFollow}
+                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition ${
+                  following ? "bg-slate-200 text-slate-700 hover:bg-slate-300" : "bg-cyan-600 text-white hover:bg-cyan-700"
+                }`}
+              >
+                {following ? "Following" : "Follow"}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

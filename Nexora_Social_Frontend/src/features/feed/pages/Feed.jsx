@@ -1,0 +1,1047 @@
+import React, { useEffect, useState, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
+import { postsApi } from "@features/feed";
+import { useAuth } from "@features/auth/context/AuthContext";
+import { useToast } from "@shared";
+import { FiHeart, FiMessageCircle, FiShare2, FiBookmark, FiImage, FiSend, FiMoreHorizontal, FiEdit2, FiTrash2, FiChevronUp, FiX, FiChevronLeft, FiChevronRight } from "react-icons/fi";
+import { Skeleton } from "@shared";
+import { StoryTray } from "@features/feed";
+
+const REACTIONS = [
+  { key: "like", emoji: "👍", label: "Like" },
+  { key: "love", emoji: "❤️", label: "Love" },
+  { key: "haha", emoji: "😂", label: "Haha" },
+  { key: "wow", emoji: "😮", label: "Wow" },
+  { key: "sad", emoji: "😢", label: "Sad" },
+  { key: "angry", emoji: "😠", label: "Angry" },
+];
+
+const EMOJI = { like: "👍", love: "❤️", haha: "😂", wow: "😮", sad: "😢", angry: "😠" };
+
+/**
+ * FB-style photo layout:
+ *  - 1 photo  → full-width, keeps its natural ratio (never stretched)
+ *  - 2 photos → two squares side by side
+ *  - 3 photos → big left + two stacked right
+ *  - 4+       → 2-column square grid
+ * Clicking any photo opens the full-screen viewer.
+ */
+function PostImages({ images, onOpen }) {
+  const count = images.length;
+
+  if (count === 1) {
+    return (
+      <div
+        className="rounded-lg overflow-hidden bg-black/5 border border-slate-200/60 cursor-zoom-in"
+        onClick={() => onOpen(0)}
+      >
+        <img src={images[0]} alt="" className="w-full max-h-[480px] sm:max-h-[560px] object-contain" />
+      </div>
+    );
+  }
+
+  if (count === 3) {
+    return (
+      <div className="grid grid-cols-2 grid-rows-2 gap-0.5 rounded-lg overflow-hidden h-56 sm:h-72">
+        <img
+          src={images[0]}
+          alt=""
+          onClick={() => onOpen(0)}
+          className="row-span-2 h-full w-full object-cover cursor-zoom-in hover:brightness-95 transition"
+        />
+        {images.slice(1, 3).map((url, i) => (
+          <img
+            key={i}
+            src={url}
+            alt=""
+            onClick={() => onOpen(i + 1)}
+            className="h-full w-full object-cover cursor-zoom-in hover:brightness-95 transition"
+          />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-0.5 rounded-lg overflow-hidden">
+      {images.slice(0, 4).map((url, i) => (
+        <div key={i} className="relative aspect-square">
+          <img
+            src={url}
+            alt=""
+            onClick={() => onOpen(i)}
+            className="h-full w-full object-cover cursor-zoom-in hover:brightness-95 transition"
+          />
+          {i === 3 && count > 4 && (
+            <div className="absolute inset-0 bg-black/50 text-white flex items-center justify-center text-2xl font-bold">
+              +{count - 4}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function Feed() {
+  const { user } = useAuth();
+  const { showToast } = useToast();
+  const [searchParams] = useSearchParams();
+  const focusPostId = searchParams.get("post");
+  const [posts, setPosts] = useState([]);
+  const [cursor, setCursor] = useState(null);
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [text, setText] = useState("");
+  const [files, setFiles] = useState([]);
+  const [posting, setPosting] = useState(false);
+  const [openComments, setOpenComments] = useState({});
+  const [commentText, setCommentText] = useState({});
+  const [comments, setComments] = useState({});
+  // Threaded comment replies (backend already stores replies via `parent`)
+  const [replies, setReplies] = useState({}); // parentId -> [reply]
+  const [openReplies, setOpenReplies] = useState({}); // parentId -> bool
+  const [loadingReplies, setLoadingReplies] = useState({}); // parentId -> bool
+  const [replyTo, setReplyTo] = useState({}); // postId -> parentId
+  const [replyText, setReplyText] = useState({}); // parentId -> text
+  const [reactionModal, setReactionModal] = useState(null);
+  const [shareTarget, setShareTarget] = useState(null);
+  const [shareText, setShareText] = useState("");
+  const [sharing, setSharing] = useState(false);
+  const fileRef = useRef();
+  const [menuPostId, setMenuPostId] = useState(null); // owner-only post menu
+  const [editTarget, setEditTarget] = useState(null); // post being edited
+  const [editText, setEditText] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editRemove, setEditRemove] = useState([]); // image URLs to drop on save
+  const [editFiles, setEditFiles] = useState([]); // newly picked images
+  const editFileRef = useRef();
+  const [pickerPostId, setPickerPostId] = useState(null); // hover reaction picker
+  const [lightbox, setLightbox] = useState(null); // { images: [], index: 0 } full-screen viewer
+  const [highlightPostId, setHighlightPostId] = useState(null); // deep-linked notification target
+  const focusedPostRef = useRef(false);
+  const scrollTimerRef = useRef(null);
+  const highlightTimerRef = useRef(null);
+  const pickerTimerRef = useRef(null);
+  const sentinelRef = useRef(null);
+
+  // Close the post menu when clicking anywhere outside it.
+  // NOTE: a shared ref can't track every post's menu (only the last rendered
+  // one holds it), which made Edit/Delete clicks get cancelled by this very
+  // handler before firing — so detect the menu via a data attribute instead.
+  useEffect(() => {
+    const handler = (e) => {
+      if (!e.target.closest?.("[data-post-menu]")) setMenuPostId(null);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const openPicker = (postId) => {
+    if (pickerTimerRef.current) clearTimeout(pickerTimerRef.current);
+    setPickerPostId(postId);
+  };
+  const scheduleClosePicker = () => {
+    if (pickerTimerRef.current) clearTimeout(pickerTimerRef.current);
+    // small delay so the cursor can travel into the popup
+    pickerTimerRef.current = setTimeout(() => setPickerPostId(null), 350);
+  };
+  useEffect(() => () => pickerTimerRef.current && clearTimeout(pickerTimerRef.current), []);
+
+  // Full-screen viewer: Esc closes, arrows navigate
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") setLightbox(null);
+      else if (e.key === "ArrowRight")
+        setLightbox((l) => (l ? { ...l, index: (l.index + 1) % l.images.length } : l));
+      else if (e.key === "ArrowLeft")
+        setLightbox((l) => (l ? { ...l, index: (l.index - 1 + l.images.length) % l.images.length } : l));
+    };
+    window.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden"; // prevent background scroll
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [lightbox]);
+
+  const loadFeed = async (nextCursor = null) => {
+    if (loading) return;
+    setLoading(true);
+    try {
+      const res = await postsApi.feed(nextCursor);
+      let newPosts = res.data?.posts || [];
+
+      // Deep link from a notification: if the target post is not on the first
+      // feed page (older post), fetch it and show it at the top.
+      if (!nextCursor && focusPostId && !newPosts.some((p) => String(p._id) === String(focusPostId))) {
+        try {
+          const single = await postsApi.get(focusPostId);
+          if (single.data?.post) newPosts = [single.data.post, ...newPosts];
+        } catch {
+          // Deleted or not visible — keep the normal feed.
+        }
+      }
+
+      setPosts((prev) => (nextCursor ? [...prev, ...newPosts] : newPosts));
+      setCursor(res.data?.nextCursor || null);
+      setHasMore(!!res.data?.hasMore);
+    } catch (e) {
+      showToast(e?.response?.data?.message || "Failed to load feed", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadFeed();
+  }, []);
+
+  // Scroll to and open the comments of the notification's target post.
+  useEffect(() => {
+    if (!focusPostId || focusedPostRef.current) return;
+    const el = document.getElementById(`post-${focusPostId}`);
+    if (!el) return;
+
+    focusedPostRef.current = true;
+    setOpenComments((prev) => ({ ...prev, [focusPostId]: true }));
+    if (!comments[focusPostId]) {
+      postsApi
+        .comments(focusPostId)
+        .then((res) => setComments((prev) => ({ ...prev, [focusPostId]: res.data?.comments || [] })))
+        .catch(() => {});
+    }
+    setHighlightPostId(focusPostId);
+    scrollTimerRef.current = setTimeout(
+      () => el.scrollIntoView({ behavior: "smooth", block: "center" }),
+      150,
+    );
+    highlightTimerRef.current = setTimeout(() => setHighlightPostId(null), 2800);
+  }, [focusPostId, posts]);
+
+  useEffect(
+    () => () => {
+      clearTimeout(scrollTimerRef.current);
+      clearTimeout(highlightTimerRef.current);
+    },
+    [],
+  );
+
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    if (!text.trim() && !files.length) return;
+    setPosting(true);
+    try {
+      const fd = new FormData();
+      fd.append("text", text);
+      files.forEach((f) => fd.append("images", f));
+      const res = await postsApi.create(fd);
+      const post = res.data?.post;
+      if (post) setPosts((prev) => [post, ...prev]);
+      setText("");
+      setFiles([]);
+      if (fileRef.current) fileRef.current.value = "";
+      showToast("Post created", "success");
+    } catch (e) {
+      showToast(e?.response?.data?.message || "Failed to create post", "error");
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  const handleReact = async (post, type) => {
+    try {
+      const res = await postsApi.react("post", post._id, type);
+      const data = res.data || {};
+      setPosts((prev) =>
+        prev.map((p) => {
+          if (p._id !== post._id) return p;
+          return {
+            ...p,
+            likesCount: data.total ?? p.likesCount,
+            reactionCounts: data.reactionCounts || p.reactionCounts,
+            myReaction: data.myReaction ?? (data.action === "removed" ? null : type),
+          };
+        }),
+      );
+    } catch (e) {
+      showToast(e?.response?.data?.message || "Failed to react", "error");
+    }
+  };
+
+  const toggleComments = async (postId) => {
+    if (openComments[postId]) {
+      setOpenComments((prev) => ({ ...prev, [postId]: false }));
+      return;
+    }
+    setOpenComments((prev) => ({ ...prev, [postId]: true }));
+    if (!comments[postId]) {
+      try {
+        const res = await postsApi.comments(postId);
+        setComments((prev) => ({ ...prev, [postId]: res.data?.comments || [] }));
+      } catch (e) {
+        showToast("Failed to load comments", "error");
+      }
+    }
+  };
+
+  const submitComment = async (postId) => {
+    const content = (commentText[postId] || "").trim();
+    if (!content) return;
+    try {
+      const res = await postsApi.addComment(postId, content);
+      const c = res.data?.comment;
+      if (c) setComments((prev) => ({ ...prev, [postId]: [...(prev[postId] || []), c] }));
+      setCommentText((prev) => ({ ...prev, [postId]: "" }));
+      setPosts((prev) => prev.map((p) => (p._id === postId ? { ...p, commentsCount: (p.commentsCount || 0) + 1 } : p)));
+    } catch (e) {
+      showToast(e?.response?.data?.message || "Failed to comment", "error");
+    }
+  };
+
+  const loadReplies = async (postId, parentId) => {
+    if (replies[parentId] || loadingReplies[parentId]) return;
+    setLoadingReplies((prev) => ({ ...prev, [parentId]: true }));
+    try {
+      const res = await postsApi.comments(postId, 1, parentId);
+      setReplies((prev) => ({ ...prev, [parentId]: res.data?.comments || [] }));
+    } catch {
+      showToast("Failed to load replies", "error");
+    } finally {
+      setLoadingReplies((prev) => ({ ...prev, [parentId]: false }));
+    }
+  };
+
+  const toggleReplies = (postId, comment) => {
+    const parentId = comment._id;
+    const next = !openReplies[parentId];
+    setOpenReplies((prev) => ({ ...prev, [parentId]: next }));
+    if (next) loadReplies(postId, parentId);
+  };
+
+  const startReply = (postId, comment) => {
+    setReplyTo((prev) => ({ ...prev, [postId]: comment._id }));
+    setReplyText((prev) => ({ ...prev, [comment._id]: prev[comment._id] || "" }));
+  };
+
+  const submitReply = async (postId, comment) => {
+    const content = (replyText[comment._id] || "").trim();
+    if (!content) return;
+    try {
+      const res = await postsApi.addComment(postId, content, comment._id);
+      const created = res.data?.comment;
+      if (created) {
+        setReplies((prev) => ({ ...prev, [comment._id]: [...(prev[comment._id] || []), created] }));
+        setOpenReplies((prev) => ({ ...prev, [comment._id]: true }));
+        setComments((prev) => ({
+          ...prev,
+          [postId]: (prev[postId] || []).map((x) =>
+            x._id === comment._id ? { ...x, repliesCount: (x.repliesCount || 0) + 1 } : x,
+          ),
+        }));
+      }
+      setReplyText((prev) => ({ ...prev, [comment._id]: "" }));
+      setReplyTo((prev) => ({ ...prev, [postId]: null }));
+      setPosts((prev) =>
+        prev.map((p) => (p._id === postId ? { ...p, commentsCount: (p.commentsCount || 0) + 1 } : p)),
+      );
+    } catch (e) {
+      showToast(e?.response?.data?.message || "Failed to reply", "error");
+    }
+  };
+
+  const handleSave = async (post) => {
+    try {
+      const res = await postsApi.save(post._id);
+      showToast(res.data?.saved ? "Saved" : "Unsaved", "success");
+    } catch (e) {
+      showToast("Failed", "error");
+    }
+  };
+
+  const handleShare = (post) => {
+    setShareTarget(post);
+    setShareText("");
+  };
+
+  const submitShare = async () => {
+    if (!shareTarget || sharing) return;
+    setSharing(true);
+    try {
+      const fd = new FormData();
+      fd.append("text", shareText.trim()); // caption optional — user decides
+      fd.append("sharedPostId", shareTarget._id);
+      const res = await postsApi.create(fd);
+      const newPost = res.data?.post;
+      if (newPost) setPosts((prev) => [newPost, ...prev]);
+      showToast("Shared to your feed", "success");
+      setShareTarget(null);
+      setShareText("");
+    } catch (e) {
+      showToast(e?.response?.data?.message || "Failed to share", "error");
+    } finally {
+      setSharing(false);
+    }
+  };
+
+  const handleDelete = async (post) => {
+    if (!window.confirm("Delete this post?")) return;
+    try {
+      await postsApi.remove(post._id);
+      setPosts((prev) => prev.filter((p) => p._id !== post._id));
+      showToast("Post deleted", "success");
+    } catch (e) {
+      showToast(e?.response?.data?.message || "Failed to delete", "error");
+    }
+  };
+
+  const openEdit = (post) => {
+    setMenuPostId(null);
+    setEditTarget(post);
+    setEditText(post.text || "");
+    setEditRemove([]);
+    setEditFiles([]);
+  };
+
+  const submitEdit = async () => {
+    if (!editTarget || savingEdit) return;
+    const keptImages = (editTarget.attachments || []).filter((url) => !editRemove.includes(url));
+    if (!editText.trim() && !keptImages.length && !editFiles.length && !editTarget.sharedPost) {
+      showToast("Post cannot be empty — add text or an image", "error");
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      const res = await postsApi.update(editTarget._id, {
+        text: editText.trim(),
+        images: editFiles,
+        removeImages: editRemove,
+      });
+      const updated = res.data?.post;
+      if (updated) setPosts((prev) => prev.map((p) => (p._id === updated._id ? { ...p, ...updated } : p)));
+      showToast("Post updated", "success");
+      setEditTarget(null);
+      setEditRemove([]);
+      setEditFiles([]);
+    } catch (e) {
+      showToast(e?.response?.data?.message || "Failed to update post", "error");
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  return (
+    <div className="max-w-2xl mx-auto py-4 sm:py-6 px-3 sm:px-4 space-y-4 sm:space-y-6">
+      {/* Create post — slim single-row style */}
+      <div className="bg-white rounded-2xl shadow px-4 pt-4 pb-2.5">
+        <form onSubmit={handleCreate} className="space-y-2">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="What's on your mind?"
+            className="w-full neo-input rounded-lg px-3 py-2 text-sm resize-none placeholder:text-slate-400"
+            rows={2}
+          />
+          {files.length > 0 && (
+            <div className="flex gap-2 flex-wrap">
+              {files.map((f, i) => (
+                <span key={i} className="text-xs bg-slate-100 px-2 py-1 rounded">{f.name}</span>
+              ))}
+            </div>
+          )}
+          <div className="flex items-center justify-between border-t pt-1.5">
+            <button type="button" onClick={() => fileRef.current?.click()} className="flex items-center gap-1.5 text-slate-600 hover:text-brand text-sm py-1">
+              <FiImage /> Photo
+            </button>
+            <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={(e) => setFiles(Array.from(e.target.files || []))} />
+            <button type="submit" disabled={posting} className="px-3.5 py-1.5 rounded-lg bg-brand text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50">
+              {posting ? "Posting..." : "Post"}
+            </button>
+          </div>
+        </form>
+      </div>
+
+      {/* FB-style story tray — square cards, right under the composer */}
+      <StoryTray />
+
+      {/* Feed */}
+      {posts.map((post) => {
+        const author = post.author || {};
+        const isOwner = author._id === user?._id || author === user?._id;
+        const totalReactions = REACTIONS.reduce((s, r) => s + (post.reactionCounts?.[r.key] || 0), 0);
+        return (
+          <div
+            key={post._id}
+            id={`post-${post._id}`}
+            className={`bg-white rounded-2xl shadow p-3 sm:p-4 space-y-3 transition ${
+              highlightPostId === post._id ? "ring-2 ring-indigo-400 ring-offset-2" : ""
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-3 min-w-0">
+                <img src={author.avatar || "https://via.placeholder.com/40"} alt="" className="w-9 h-9 sm:w-10 sm:h-10 rounded-full object-cover shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-[15px] sm:text-base font-semibold truncate">{author.fullname || "User"}</p>
+                  <p className="text-[11px] sm:text-xs text-slate-400 truncate">{new Date(post.createdAt).toLocaleString()}</p>
+                </div>
+              </div>
+              {isOwner && (
+                <div data-post-menu className="relative shrink-0">
+                  <button
+                    onClick={() => setMenuPostId(menuPostId === post._id ? null : post._id)}
+                    className="p-1.5 rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                    aria-label="Post options"
+                  >
+                    <FiMoreHorizontal />
+                  </button>
+                  {menuPostId === post._id && (
+                    <div className="absolute right-0 top-full mt-1 z-30 w-36 bg-white rounded-xl neo-menu border py-1 text-sm shadow">
+                      <button onClick={() => openEdit(post)} className="w-full flex items-center gap-2 text-left px-3 py-2 hover:bg-slate-50">
+                        <FiEdit2 /> Edit
+                      </button>
+                      <button
+                        onClick={() => {
+                          setMenuPostId(null);
+                          handleDelete(post);
+                        }}
+                        className="w-full flex items-center gap-2 text-left px-3 py-2 text-red-600 hover:bg-red-50"
+                      >
+                        <FiTrash2 /> Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            {post.text && <p className="text-[14px] sm:text-[15px] leading-relaxed whitespace-pre-wrap break-words">{post.text}</p>}
+            {post.sharedPost && (
+              <div className="border rounded-lg p-3 bg-slate-50">
+                <p className="text-xs text-slate-500 mb-1">Shared post by {post.sharedPost?.author?.fullname || "User"}</p>
+                <p className="text-[13px] sm:text-sm break-words">{post.sharedPost?.text}</p>
+                {post.sharedPost?.attachments?.length > 0 && (
+                  <img src={post.sharedPost.attachments[0]} alt="" className="mt-2 rounded-lg w-full object-cover max-h-60" />
+                )}
+              </div>
+            )}
+            {post.attachments?.length > 0 && (
+              <PostImages images={post.attachments} onOpen={(idx) => setLightbox({ images: post.attachments, index: idx })} />
+            )}
+            {post.hashtags?.length > 0 && (
+              <div className="flex gap-2 flex-wrap">
+                {post.hashtags.map((h) => (
+                  <span key={h} className="text-brand text-sm">#{h}</span>
+                ))}
+              </div>
+            )}
+            {/* Reaction summary — tap to see who reacted */}
+            {totalReactions > 0 && (
+              <button
+                onClick={() =>
+                  postsApi
+                    .reactions("post", post._id)
+                    .then((res) => setReactionModal({ post, data: res.data }))
+                    .catch(() => showToast("Failed to load reactions", "error"))
+                }
+                className="flex items-center gap-1.5 text-[11px] text-slate-500 hover:text-brand hover:underline w-fit max-w-full"
+              >
+                <span className="flex -space-x-1">
+                  {REACTIONS.filter((r) => (post.reactionCounts?.[r.key] || 0) > 0)
+                    .slice(0, 3)
+                    .map((r) => (
+                      <span
+                        key={r.key}
+                        className="w-[17px] h-[17px] rounded-full bg-white border border-slate-200 flex items-center justify-center text-[9px]"
+                      >
+                        {r.emoji}
+                      </span>
+                    ))}
+                </span>
+                <span className="truncate">
+                  {post.myReaction
+                    ? totalReactions > 1
+                      ? `You and ${totalReactions - 1} other${totalReactions - 1 > 1 ? "s" : ""}`
+                      : "You"
+                    : `${totalReactions} ${totalReactions === 1 ? "person" : "people"} reacted`}
+                </span>
+              </button>
+            )}
+
+            {/* Actions — always one row, 4 equal cells, no wrapping */}
+            <div className="grid grid-cols-4 gap-0.5 border-t pt-1.5 text-slate-500">
+              {/* React */}
+              <div
+                className="relative flex items-center min-w-0"
+                onMouseEnter={() => openPicker(post._id)}
+                onMouseLeave={scheduleClosePicker}
+              >
+                {pickerPostId === post._id && (
+                  <div className="absolute bottom-full left-0 z-30 mb-2 flex items-end gap-0.5 rounded-full bg-white border border-slate-100 shadow-[0_8px_30px_rgba(0,0,0,0.15)] px-2.5 sm:px-3 py-2">
+                    {REACTIONS.map((r, i) => (
+                      <button
+                        key={r.key}
+                        onClick={() => {
+                          handleReact(post, r.key);
+                          setPickerPostId(null);
+                        }}
+                        title={r.label}
+                        className="group/emoji relative p-1 emoji-pop"
+                        style={{ animationDelay: `${i * 45}ms` }}
+                      >
+                        <span className="block text-2xl sm:text-3xl leading-none transition-transform duration-150 group-hover/emoji:scale-[1.7] group-hover/emoji:-translate-y-1.5">
+                          {r.emoji}
+                        </span>
+                        <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-800 text-white text-[10px] px-1.5 py-0.5 opacity-0 group-hover/emoji:opacity-100 transition">
+                          {r.label}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={() => handleReact(post, post.myReaction || "like")}
+                  title={post.myReaction ? "Remove reaction" : "Like"}
+                  className="group/react flex flex-1 min-w-0 items-center justify-center gap-1.5 rounded-lg py-2 hover:bg-slate-100 transition"
+                >
+                  {/* React না দেওয়া থাকলে icon পুরোপুরি GRAY (কোনো রঙ নেই),
+                      কিন্তু 충분히 স্পষ্ট — যাতে দেখেই বোঝা যায় react দেওয়া
+                      হয়নি। React দিলে full রঙিন ও উজ্জ্বল হয়ে আলাদা হয়। */}
+                  <span
+                    className={`text-[17px] leading-none transition-all duration-150 ${
+                      post.myReaction
+                        ? ""
+                        : "opacity-80 grayscale group-hover/react:opacity-100 group-hover/react:grayscale-0"
+                    }`}
+                  >
+                    {EMOJI[post.myReaction || "like"]}
+                  </span>
+                  {totalReactions > 0 && (
+                    <span className="text-xs font-semibold text-slate-600 tabular-nums">{totalReactions}</span>
+                  )}
+                  <span
+                    className={`hidden md:inline text-[13px] ${
+                      post.myReaction ? "reaction-active" : "reaction-idle"
+                    }`}
+                  >
+                    {post.myReaction ? "Liked" : "Like"}
+                  </span>
+                </button>
+                {/* Mobile: small caret to open the emoji picker (no hover on touch) */}
+                <button
+                  onClick={() => (pickerPostId === post._id ? setPickerPostId(null) : openPicker(post._id))}
+                  className="sm:hidden shrink-0 p-1 text-slate-400"
+                  aria-label="Choose reaction"
+                >
+                  <FiChevronUp size={12} className={`transition ${pickerPostId === post._id ? "rotate-180" : ""}`} />
+                </button>
+              </div>
+
+              {/* Comment */}
+              <button
+                onClick={() => toggleComments(post._id)}
+                className="flex items-center justify-center gap-1.5 rounded-lg py-2 hover:bg-slate-100 hover:text-brand transition min-w-0"
+              >
+                <FiMessageCircle size={18} />
+                <span className="text-xs font-semibold tabular-nums">{post.commentsCount || 0}</span>
+                <span className="hidden md:inline text-[13px] font-medium">Comment</span>
+              </button>
+
+              {/* Share */}
+              <button
+                onClick={() => handleShare(post)}
+                className="flex items-center justify-center gap-1.5 rounded-lg py-2 hover:bg-slate-100 hover:text-brand transition min-w-0"
+              >
+                <FiShare2 size={18} />
+                <span className="text-xs font-semibold tabular-nums">{post.sharesCount || 0}</span>
+                <span className="hidden md:inline text-[13px] font-medium">Share</span>
+              </button>
+
+              {/* Save */}
+              <button
+                onClick={() => handleSave(post)}
+                className="flex items-center justify-center gap-1.5 rounded-lg py-2 hover:bg-slate-100 hover:text-brand transition min-w-0"
+              >
+                <FiBookmark size={18} />
+                <span className="text-xs font-semibold tabular-nums">{post.savesCount || 0}</span>
+                <span className="hidden md:inline text-[13px] font-medium">Save</span>
+              </button>
+            </div>
+
+            {/* Comments + replies */}
+            {openComments[post._id] && (
+              <div className="space-y-3 border-t pt-3">
+                {(comments[post._id] || []).map((c) => {
+                  const thread = replies[c._id] || [];
+                  const isOpen = !!openReplies[c._id];
+                  const replying = replyTo[post._id] === c._id;
+                  const replyCount = c.repliesCount || thread.length;
+                  return (
+                    <div key={c._id} className="flex gap-2">
+                      <img
+                        src={c.author?.avatar || "https://via.placeholder.com/32"}
+                        alt=""
+                        className="w-7 h-7 sm:w-8 sm:h-8 rounded-full object-cover shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="inline-block max-w-full rounded-2xl bg-slate-100 px-3 py-1.5">
+                          <p className="text-[12px] font-semibold text-slate-800 leading-tight truncate">
+                            {c.author?.fullname || "User"}
+                          </p>
+                          <p className="text-[13px] text-slate-700 break-words whitespace-pre-wrap">{c.text}</p>
+                        </div>
+
+                        <div className="flex items-center gap-3 mt-1 pl-1 text-[11px] font-semibold text-slate-500">
+                          <button onClick={() => startReply(post._id, c)} className="hover:text-brand transition">
+                            Reply
+                          </button>
+                          {replyCount > 0 && (
+                            <button onClick={() => toggleReplies(post._id, c)} className="hover:text-brand transition">
+                              {isOpen ? "Hide replies" : `${replyCount} ${replyCount === 1 ? "reply" : "replies"}`}
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Replies (indented thread) */}
+                        {isOpen && (
+                          <div className="mt-2 space-y-2 border-l-2 border-slate-200 pl-2 sm:pl-3">
+                            {loadingReplies[c._id] && !thread.length && (
+                              <p className="text-[11px] text-slate-400">Loading replies…</p>
+                            )}
+                            {thread.map((r) => (
+                              <div key={r._id} className="flex gap-2">
+                                <img
+                                  src={r.author?.avatar || "https://via.placeholder.com/24"}
+                                  alt=""
+                                  className="w-6 h-6 rounded-full object-cover shrink-0"
+                                />
+                                <div className="min-w-0 rounded-2xl bg-slate-50 px-3 py-1.5">
+                                  <p className="text-[11px] font-semibold text-slate-800 leading-tight truncate">
+                                    {r.author?.fullname || "User"}
+                                  </p>
+                                  <p className="text-[12.5px] text-slate-700 break-words whitespace-pre-wrap">{r.text}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Reply composer */}
+                        {replying && (
+                          <div className="flex items-center gap-1.5 sm:gap-2 mt-2">
+                            <input
+                              autoFocus
+                              value={replyText[c._id] || ""}
+                              onChange={(e) => setReplyText((prev) => ({ ...prev, [c._id]: e.target.value }))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && !e.shiftKey) {
+                                  e.preventDefault();
+                                  submitReply(post._id, c);
+                                }
+                                if (e.key === "Escape") setReplyTo((prev) => ({ ...prev, [post._id]: null }));
+                              }}
+                              placeholder={`Reply to ${c.author?.fullname?.split(" ")[0] || "comment"}…`}
+                              className="flex-1 min-w-0 rounded-full border bg-slate-50 px-3 py-1.5 text-[13px] focus:ring-2 focus:ring-brand focus:outline-none"
+                            />
+                            <button
+                              onClick={() => setReplyTo((prev) => ({ ...prev, [post._id]: null }))}
+                              className="shrink-0 text-[11px] font-semibold text-slate-500 hover:text-slate-800"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => submitReply(post._id, c)}
+                              className="shrink-0 w-8 h-8 rounded-full bg-brand text-white flex items-center justify-center hover:bg-indigo-700 transition"
+                              aria-label="Send reply"
+                            >
+                              <FiSend size={14} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* New comment composer */}
+                <div className="flex items-center gap-2 min-w-0 pt-0.5">
+                  <img
+                    src={user?.avatar || "https://via.placeholder.com/28"}
+                    alt=""
+                    className="hidden sm:block w-8 h-8 rounded-full object-cover shrink-0"
+                  />
+                  <input
+                    value={commentText[post._id] || ""}
+                    onChange={(e) => setCommentText((prev) => ({ ...prev, [post._id]: e.target.value }))}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        submitComment(post._id);
+                      }
+                    }}
+                    placeholder="Write a comment..."
+                    className="flex-1 min-w-0 rounded-full border bg-slate-50 px-3.5 py-2 text-[13px] focus:ring-2 focus:ring-brand focus:outline-none"
+                  />
+                  <button
+                    onClick={() => submitComment(post._id)}
+                    className="shrink-0 w-9 h-9 rounded-full bg-brand text-white flex items-center justify-center hover:bg-indigo-700 transition"
+                    aria-label="Send comment"
+                  >
+                    <FiSend size={15} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {reactionModal && (
+        <div className="fixed inset-0 z-[80] bg-black/50 flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl neo-modal p-4 sm:p-5 w-full max-w-md max-h-[75vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-brand">Reactions ({reactionModal.data?.total || 0})</h3>
+              <button onClick={() => setReactionModal(null)} className="text-slate-500 hover:text-slate-800">✕</button>
+            </div>
+            {Object.entries(reactionModal.data?.grouped || {}).map(([type, users]) => (
+              <div key={type} className="mb-3">
+                <p className="text-sm font-semibold text-slate-700 mb-1">{EMOJI[type] || type} {users.length}</p>
+                <div className="space-y-1">
+                  {(users || []).map((u) => (
+                    <div key={u._id} className="flex items-center gap-2">
+                      <img src={u.avatar || "https://via.placeholder.com/24"} alt="" className="w-7 h-7 rounded-full object-cover" />
+                      <span className="text-sm text-slate-800">{u.fullname}</span>
+                      {u._id === user?._id && <span className="text-xs text-slate-400">(You)</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {!reactionModal.data?.total && <p className="text-slate-500 text-sm">No reactions yet</p>}
+          </div>
+        </div>
+      )}
+
+      {/* Full-screen image viewer (FB-style lightbox) */}
+      {lightbox && (
+        <div
+          className="fixed inset-0 z-[90] bg-black/95 flex items-center justify-center p-3 sm:p-6"
+          onClick={() => setLightbox(null)}
+        >
+          <button
+            onClick={() => setLightbox(null)}
+            className="absolute top-3 right-3 sm:top-5 sm:right-5 z-10 w-10 h-10 rounded-full bg-white/10 hover:bg-white/25 text-white flex items-center justify-center text-lg transition"
+            aria-label="Close"
+          >
+            <FiX />
+          </button>
+
+          {lightbox.images.length > 1 && (
+            <>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setLightbox((l) => ({ ...l, index: (l.index - 1 + l.images.length) % l.images.length }));
+                }}
+                className="absolute left-2 sm:left-5 z-10 w-10 h-10 rounded-full bg-white/10 hover:bg-white/25 text-white flex items-center justify-center text-xl transition"
+                aria-label="Previous image"
+              >
+                <FiChevronLeft />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setLightbox((l) => ({ ...l, index: (l.index + 1) % l.images.length }));
+                }}
+                className="absolute right-2 sm:right-5 z-10 w-10 h-10 rounded-full bg-white/10 hover:bg-white/25 text-white flex items-center justify-center text-xl transition"
+                aria-label="Next image"
+              >
+                <FiChevronRight />
+              </button>
+            </>
+          )}
+
+          <img
+            src={lightbox.images[lightbox.index]}
+            alt=""
+            onClick={(e) => e.stopPropagation()}
+            className="max-h-[85vh] max-w-[92vw] object-contain rounded-lg shadow-2xl select-none"
+          />
+
+          {lightbox.images.length > 1 && (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/80 text-xs bg-white/10 px-3 py-1 rounded-full">
+              {lightbox.index + 1} / {lightbox.images.length}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Edit post modal — author only (backend enforces too) */}
+      {editTarget && (
+        <div
+          className="fixed inset-0 z-[80] bg-black/50 flex items-center justify-center p-3 sm:p-4"
+          onClick={() => !savingEdit && setEditTarget(null)}
+        >
+          <div
+            className="bg-white rounded-2xl neo-modal p-4 sm:p-5 w-full max-w-lg space-y-3 max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-brand">Edit post</h3>
+              <button onClick={() => setEditTarget(null)} disabled={savingEdit} className="text-slate-500 hover:text-slate-800 disabled:opacity-50">
+                ✕
+              </button>
+            </div>
+            <textarea
+              value={editText}
+              onChange={(e) => setEditText(e.target.value)}
+              rows={4}
+              disabled={savingEdit}
+              className="w-full neo-input rounded-lg p-3 resize-none focus:ring-2 focus:ring-brand focus:outline-none text-sm"
+            />
+
+            {/* Images — remove old ones, add new ones */}
+            {(((editTarget.attachments || []).some((url) => !editRemove.includes(url))) ||
+              editFiles.length > 0) && (
+              <div className="grid grid-cols-3 gap-2">
+                {(editTarget.attachments || [])
+                  .filter((url) => !editRemove.includes(url))
+                  .map((url) => (
+                    <div key={url} className="relative">
+                      <img src={url} alt="" className="rounded-lg w-full h-24 object-cover" />
+                      <button
+                        onClick={() => setEditRemove((prev) => [...prev, url])}
+                        disabled={savingEdit}
+                        title="Remove image"
+                        className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-red-500 text-white flex items-center justify-center text-xs shadow hover:bg-red-600 disabled:opacity-50"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                {editFiles.map((f, i) => (
+                  <div key={`new-${i}`} className="relative">
+                    <img src={URL.createObjectURL(f)} alt="" className="rounded-lg w-full h-24 object-cover" />
+                    <span className="absolute bottom-1 left-1 text-[9px] bg-emerald-600 text-white px-1 rounded">New</span>
+                    <button
+                      onClick={() => setEditFiles((prev) => prev.filter((_, idx) => idx !== i))}
+                      disabled={savingEdit}
+                      title="Remove"
+                      className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-red-500 text-white flex items-center justify-center text-xs shadow hover:bg-red-600 disabled:opacity-50"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => editFileRef.current?.click()}
+                disabled={savingEdit}
+                className="flex items-center gap-1.5 text-sm text-slate-600 hover:text-brand disabled:opacity-50"
+              >
+                <FiImage /> {editFiles.length ? "Add more photos" : "Change photos"}
+              </button>
+              <span className="text-xs text-slate-400">
+                {(editTarget.attachments || []).filter((url) => !editRemove.includes(url)).length + editFiles.length}/5 photos
+              </span>
+            </div>
+            <input
+              ref={editFileRef}
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+              onChange={(e) => {
+                const picked = Array.from(e.target.files || []);
+                const kept = (editTarget.attachments || []).filter((url) => !editRemove.includes(url)).length;
+                const room = Math.max(0, 5 - kept - editFiles.length);
+                if (picked.length > room) showToast(`Only ${room} more photo${room === 1 ? "" : "s"} allowed`, "info");
+                setEditFiles((prev) => [...prev, ...picked.slice(0, room)]);
+                e.target.value = "";
+              }}
+            />
+
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setEditTarget(null)}
+                disabled={savingEdit}
+                className="px-4 py-2 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitEdit}
+                disabled={savingEdit}
+                className="px-5 py-2 rounded-lg bg-brand text-white font-semibold hover:opacity-90 disabled:opacity-50"
+              >
+                {savingEdit ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Share modal — caption optional, user decides */}
+      {shareTarget && (
+        <div
+          className="fixed inset-0 z-[80] bg-black/50 flex items-center justify-center p-3 sm:p-4"
+          onClick={() => !sharing && setShareTarget(null)}
+        >
+          <div className="bg-white rounded-2xl neo-modal p-4 sm:p-5 w-full max-w-lg space-y-3 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-brand">Share post</h3>
+              <button onClick={() => setShareTarget(null)} disabled={sharing} className="text-slate-500 hover:text-slate-800 disabled:opacity-50">✕</button>
+            </div>
+            <textarea
+              value={shareText}
+              onChange={(e) => setShareText(e.target.value)}
+              placeholder="Add an optional caption... (leave empty to share as is)"
+              className="w-full border rounded-lg p-3 resize-none focus:ring-2 focus:ring-brand focus:outline-none"
+              rows={3}
+              disabled={sharing}
+            />
+            <div className="border rounded-lg p-3 bg-slate-50">
+              <p className="text-xs text-slate-500 mb-1">
+                {shareTarget._id === user?._id ? "Your post" : `Post by ${shareTarget.author?.fullname || "Unknown"}`}
+              </p>
+              <p className="text-sm line-clamp-4">{shareTarget.text || "(no text)"}</p>
+              {shareTarget.attachments?.length > 0 && (
+                <img src={shareTarget.attachments[0]} alt="" className="mt-2 rounded-lg w-full object-cover max-h-40" />
+              )}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setShareTarget(null)}
+                disabled={sharing}
+                className="px-4 py-2 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitShare}
+                disabled={sharing}
+                className="px-5 py-2 rounded-lg bg-brand text-white font-semibold hover:opacity-90 disabled:opacity-50"
+              >
+                {sharing ? "Sharing..." : "Share"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading && posts.length === 0 && (
+        <div className="space-y-4">
+          <Skeleton className="h-48 w-full rounded-2xl" count={3} />
+        </div>
+      )}
+      {!loading && posts.length === 0 && <p className="text-center text-slate-500">No posts yet. Be the first!</p>}
+      {hasMore && (
+        <button onClick={() => loadFeed(cursor)} disabled={loading} className="w-full py-2 rounded-lg bg-slate-100 hover:bg-slate-200">
+          {loading ? "Loading..." : "Load more"}
+        </button>
+      )}
+    </div>
+  );
+}

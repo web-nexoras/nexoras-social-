@@ -1,0 +1,66 @@
+const { uploadCloudinary, destroyFromCloudinary } = require("../../helpers/utils");
+const userSchema = require("../../models/User");
+const { safeDel } = require("../../helpers/redis");
+
+// --------------update profile controller
+const updateProfile = async (req, res) => {
+  const { fullname, address } = req.body;
+  const avatar = req.file || req.files?.[0];
+
+  try {
+    const user = await userSchema.findById(req.user._id);
+
+    if (!user) {
+      return res.status(400).send({
+        message: "Invalid Request",
+      });
+    }
+
+    if (fullname?.trim()) {
+      user.fullname = fullname;
+    }
+
+    if (address?.trim()) {
+      user.address = address;
+    }
+
+    if (avatar) {
+      try {
+        const avatarUrl = await uploadCloudinary({
+          mimetype: avatar.mimetype,
+          imgBuffer: avatar.buffer,
+        });
+
+        if (user.avatar) {
+          destroyFromCloudinary(user.avatar).catch((err) =>
+            console.error("Cloudinary destroy error:", err?.message || err),
+          );
+        }
+        user.avatar = avatarUrl;
+      } catch (error) {
+        console.log("Cloudinary upload error", error);
+        return res.status(500).send({ message: "Failed to upload avatar" });
+      }
+    }
+
+    await user.save();
+
+    // Invalidate caches (best-effort — a Redis outage must not fail the save)
+    await safeDel(`profile:${req.user._id}`, `authuser:${req.user._id}`);
+
+    res.status(200).send({
+      message: "Profile Updated",
+      user,
+    });
+  } catch (error) {
+    console.log(error);
+
+    res.status(500).send({
+      message: "Server Error",
+    });
+  }
+};
+
+module.exports = {
+  updateProfile
+};
